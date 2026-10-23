@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#14213d">
+<title>移動記録</title>
+<style>
+:root{--ink:#14213d;--bg:#eef1f6;--card:#fff;--go:#1b8a5a;--swap:#d98a00;--stop:#c0392b;--mute:#5c667a}
+@media (prefers-color-scheme:dark){:root{--ink:#e8ecf4;--bg:#10151f;--card:#1b2230;--mute:#9aa5ba}}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{font-family:system-ui,"Hiragino Sans","Noto Sans JP",sans-serif;background:var(--bg);color:var(--ink);padding:env(safe-area-inset-top) 16px env(safe-area-inset-bottom)}
+main{max-width:480px;margin:0 auto;min-height:100%;display:flex;flex-direction:column;justify-content:center;gap:16px;padding:24px 0}
+[hidden]{display:none!important}
+h1{font-size:1.1rem;margin:0;color:var(--mute);font-weight:600}
+.big{width:100%;border:0;border-radius:20px;color:#fff;font-size:2rem;font-weight:700;padding:44px 16px}
+.big.go{background:var(--go)}.big.swap{background:var(--swap);padding:30px 16px;font-size:1.6rem}.big.stop{background:var(--stop)}
+.card{background:var(--card);border-radius:16px;padding:20px}
+.mode{font-size:2.4rem;font-weight:700;margin:4px 0}
+.mute{color:var(--mute);font-size:.9rem;line-height:1.6}
+input{width:100%;font-size:1.2rem;padding:14px;border-radius:12px;border:2px solid var(--mute);background:var(--card);color:var(--ink);margin:12px 0}
+.ok{width:100%;border:0;border-radius:12px;background:var(--ink);color:var(--bg);font-size:1.1rem;padding:14px}
+#genders{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:12px 0}
+#genders button{border:2px solid var(--mute);border-radius:12px;background:var(--card);color:var(--ink);font-size:1.1rem;padding:14px 8px}
+#genders button.sel{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+#picker{position:fixed;inset:0;background:var(--bg);padding:env(safe-area-inset-top) 16px env(safe-area-inset-bottom);overflow:auto;z-index:5}
+#picker>div{max-width:480px;margin:0 auto;padding:24px 0}
+#pgrid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:16px 0}
+#pgrid button{border:0;border-radius:14px;background:var(--card);color:var(--ink);font-size:1.3rem;padding:26px 8px}
+#pgrid button:active{background:var(--ink);color:var(--bg)}
+#pcancel{background:none;border:0;color:var(--mute);font-size:1rem;padding:12px;width:100%}
+button:focus-visible,input:focus-visible{outline:3px solid #4c8dff;outline-offset:2px}
+</style>
+</head>
+<body>
+<main>
+  <section id="setup" class="card" hidden>
+    <h1>はじめに</h1>
+    <p class="mute">調査のため、性別と年齢を教えてください。名前などの個人情報は取得しません。</p>
+    <div id="genders"></div>
+    <input id="age" type="number" inputmode="numeric" min="0" max="120" placeholder="年齢(数字)">
+    <button class="ok" id="pidOk">保存して始める</button>
+  </section>
+
+  <section id="idle" hidden>
+    <h1>移動していません</h1>
+    <p class="mute">自宅を出発するときに押してください。</p>
+    <button class="big go" id="btnStart">出発</button>
+  </section>
+
+  <section id="moving" hidden>
+    <div class="card">
+      <h1>移動中</h1>
+      <div class="mode" id="mode"></div>
+      <div class="mute">経過時間 <span id="elapsed">0:00</span><br><span id="stat"></span><br><span id="gps"></span></div>
+    </div>
+    <p class="mute">位置を記録するため、移動中は画面を点けたままにしてください。</p>
+    <button class="big swap" id="btnTransfer">乗換</button>
+    <button class="big stop" id="btnEnd">到着</button>
+  </section>
+</main>
+
+<div id="picker" hidden>
+  <div>
+    <h1 id="ptitle"></h1>
+    <div id="pgrid"></div>
+    <button id="pcancel">戻る</button>
+  </div>
+</div>
+
+<script>
+// 調査の選択肢はここを論文に合わせて書き換えてください
+const GENDERS = ['男性','女性','その他','回答しない'];
+const MODES = ['自動車','電車','地下鉄','バス','バイク','原付','タクシー','自転車','徒歩','その他'];
+const PURPOSES = ['出勤','登校','帰宅','帰社','帰校','業務','送迎','買い物','食事','娯楽','散歩','回遊','その他'];
+
+const $ = (id) => document.getElementById(id);
+const S = JSON.parse(localStorage.getItem('state') || '{}');   // pid, tripId, legId, mode, startedAt, sent
+let Q = JSON.parse(localStorage.getItem('queue') || '[]');     // 未送信の座標
+const save = () => { localStorage.setItem('state', JSON.stringify(S)); localStorage.setItem('queue', JSON.stringify(Q)); };
+
+async function api(path, body) {
+  const r = await fetch('/api/' + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+
+function pick(title, items) {
+  return new Promise((resolve) => {
+    $('ptitle').textContent = title;
+    const g = $('pgrid'); g.innerHTML = '';
+    items.forEach((v) => {
+      const b = document.createElement('button');
+      b.textContent = v;
+      b.onclick = () => { $('picker').hidden = true; resolve(v); };
+      g.appendChild(b);
+    });
+    $('pcancel').onclick = () => { $('picker').hidden = true; resolve(null); };
+    $('picker').hidden = false;
+  });
+}
+
+const netError = () => alert('送信できませんでした。電波の良い場所で、もう一度押してください。');
+
+async function onStart() {
+  const mode = await pick('移動手段を選んでください', MODES); if (!mode) return;
+  const purpose = await pick('移動目的を選んでください', PURPOSES); if (!purpose) return;
+  try {
+    const r = await api('start', { participantId: S.pid, gender: S.gender, age: S.age, mode, purpose });
+    Object.assign(S, { tripId: r.tripId, legId: r.legId, mode, startedAt: Date.now(), sent: 0 });
+    save(); startTracking(); render();
+  } catch { netError(); }
+}
+
+async function onTransfer() {
+  const mode = await pick('乗り換える移動手段を選んでください', MODES); if (!mode) return;
+  await flush();
+  try {
+    const r = await api('transfer', { tripId: S.tripId, mode });
+    S.legId = r.legId; S.mode = mode; save(); render();
+  } catch { netError(); }
+}
+
+async function onEnd() {
+  if (!confirm('目的地に到着しましたか？')) return;
+  stopTracking();
+  await flush();
+  try {
+    await api('end', { tripId: S.tripId });
+    S.tripId = S.legId = S.mode = null; save(); render();
+  } catch { startTracking(); netError(); }
+}
+
+// ---- 位置の記録 ----
+let watchId = null, flushTimer = null, wake = null, lastAt = 0, flushing = false;
+
+function startTracking() {
+  if (watchId !== null) return;
+  if (!navigator.geolocation) { $('gps').textContent = 'この端末は位置情報に対応していません'; return; }
+  watchId = navigator.geolocation.watchPosition((p) => {
+    const now = Date.now();
+    if (now - lastAt < 5000) return;            // 5秒に1点まで
+    lastAt = now;
+    Q.push({ legId: S.legId, lat: p.coords.latitude, lng: p.coords.longitude, acc: p.coords.accuracy, speed: p.coords.speed, t: p.timestamp });
+    save(); renderStat();
+    $('gps').textContent = '位置を取得できています';
+  }, (e) => { $('gps').textContent = '位置情報エラー: ' + e.message; },
+  { enableHighAccuracy: true, maximumAge: 0, timeout: 30000 });
+  flushTimer = setInterval(flush, 15000);
+  lockScreen();
+}
+
+function stopTracking() {
+  if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+  watchId = null; clearInterval(flushTimer);
+  if (wake) { wake.release(); wake = null; }
+}
+
+async function flush() {
+  if (flushing || !Q.length) return;
+  flushing = true;
+  const batch = Q.slice(), done = new Set(), groups = {};
+  batch.forEach((p) => (groups[p.legId] ??= []).push(p));
+  try {
+    for (const id in groups) {
+      await api('points', { legId: Number(id), points: groups[id] });
+      groups[id].forEach((p) => done.add(p));
+      S.sent = (S.sent || 0) + groups[id].length;
+    }
+  } catch { /* 次回の送信で再試行 */ }
+  Q = Q.filter((p) => !done.has(p));
+  save(); renderStat(); flushing = false;
+}
+
+async function lockScreen() {
+  try { wake = await navigator.wakeLock.request('screen'); } catch { /* 非対応でも記録は続行 */ }
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && S.tripId) { lockScreen(); flush(); }
+});
+addEventListener('online', flush);
+
+// ---- 表示 ----
+function renderStat() { $('stat').textContent = `送信済み ${S.sent || 0}点 / 未送信 ${Q.length}点`; }
+
+function render() {
+  $('setup').hidden = !!S.pid;
+  $('idle').hidden = !S.pid || !!S.tripId;
+  $('moving').hidden = !S.tripId;
+  if (S.tripId) { $('mode').textContent = S.mode; renderStat(); }
+}
+
+setInterval(() => {
+  if (!S.tripId) return;
+  const s = Math.floor((Date.now() - S.startedAt) / 1000);
+  $('elapsed').textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}, 1000);
+
+let gender = null;
+GENDERS.forEach((g) => {
+  const b = document.createElement('button');
+  b.textContent = g;
+  b.onclick = () => {
+    gender = g;
+    [...$('genders').children].forEach((c) => c.classList.toggle('sel', c === b));
+  };
+  $('genders').appendChild(b);
+});
+
+$('pidOk').onclick = () => {
+  const age = Number($('age').value);
+  if (!gender) return alert('性別を選んでください。');
+  if (!Number.isInteger(age) || age < 0 || age > 120) return alert('年齢を数字で入力してください。');
+  // 匿名ID: 端末でランダムに生成(名前や連絡先とは結びつかない)
+  S.pid = crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+  S.gender = gender; S.age = age;
+  save(); render();
+};
+$('btnStart').onclick = onStart;
+$('btnTransfer').onclick = onTransfer;
+$('btnEnd').onclick = onEnd;
+
+render();
+if (S.tripId) startTracking();   // ページを開き直したときは記録を再開
+</script>
+</body>
+</html>
